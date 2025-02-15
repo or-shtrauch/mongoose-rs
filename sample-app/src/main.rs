@@ -1,5 +1,6 @@
 use mg::{MgConn, MgEvent, MgMgr, MgStatus};
 use std::{any::Any, cell::RefCell, rc::Rc, time::Duration};
+use log::debug;
 
 // fn on_timer(conn: &mut MgConn,
 //             ev: MgEvent,
@@ -7,16 +8,8 @@ use std::{any::Any, cell::RefCell, rc::Rc, time::Duration};
 //             user_data: Rc<RefCell<dyn Any>>) {
 //     if let Ok(mut user_data) = user_data.try_borrow_mut() {
 //         if let Some(user_data) = user_data.downcast_mut::<u32>() {
-//             println!("conn: {}, on_timer: {:?}, status: {:?}, id: {}, user_data: {}",
-//                 conn, ev, status, conn.id(), user_data);
-
-//             if conn.id() == 1 {
-//                 *user_data += 1;
-//             }
-
-//             if conn.id() == 2 {
-//                 conn.close_now();
-//             }
+//             println!("conn: {}, on_timer: {:?}, status: {:?}, user_data: {}",
+//                 conn, ev, status, user_data);
 //         }
 //     }
 // }
@@ -25,20 +18,19 @@ fn on_tcp(conn: &mut MgConn,
         ev: MgEvent,
         status: MgStatus,
         _user_data: Rc<RefCell<dyn Any>>) {
-    println!("conn: {}, tcp: {:?}, status: {:?}", conn, ev, status);
+    debug!("conn: {}, tcp: {:?}, status: {:?}", conn, ev, status);
     match ev {
-        MgEvent::EvSend => println!("Sent: {:?}", status),
-        MgEvent::EvClose => println!("tcp close"),
+        MgEvent::EvSend => debug!("Sent: {:?}", status),
+        MgEvent::EvClose => debug!("tcp close"),
         MgEvent::EvConnect => {
-            println!("sending hello");
+            debug!("sending hello");
             conn.send("hello".as_bytes());
         },
         MgEvent::EvRecv => {
             let mut buffer: String = String::new();
-            if conn.read(&mut buffer) > 0 {
-                println!("read from conn: '{}'", buffer);
-                conn.send("bytes".as_bytes());
-            }
+            conn.read(&mut buffer);
+            debug!("read from conn: '{}'", buffer);
+            conn.send("bytes".as_bytes());
         },
         _ => {}
     }

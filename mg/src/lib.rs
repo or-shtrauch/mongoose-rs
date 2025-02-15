@@ -1,6 +1,12 @@
 use uuid::Uuid;
+use log::{debug, error};
 use std::{
-    any::Any, cell::RefCell, fmt, io::{Read, Write}, net::TcpStream, rc::Rc, time::{Duration, Instant}
+    any::Any,
+    cell::RefCell,
+    fmt, io::{Read, Write},
+    net::TcpStream,
+    rc::Rc,
+    time::{Duration, Instant}
 };
 
 type UserData = Rc<RefCell<dyn Any>>;
@@ -22,7 +28,7 @@ pub enum MgStatus {
     TCPWriteError,
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug)]
 pub enum MgFlag {
     MgStart,
     MgWaitForConnection,
@@ -80,7 +86,10 @@ impl Drop for MgConn {
 
 impl Default for MgMgr {
     fn default() -> Self {
-        MgMgr { conns: Vec::new() }
+        env_logger::init();
+        MgMgr {
+            conns: Vec::new()
+        }
     }
 }
 
@@ -106,6 +115,91 @@ impl MgConn {
             cb,
             user_data,
         }
+    }
+
+    fn callback(&mut self, status: MgStatus, ev: MgEvent) {
+        (self.cb)(self, ev, status, self.user_data.clone());
+    }
+
+    fn handle_timer_conn(&mut self,
+                       index: usize,
+                       now: Instant,
+                       expired: &mut Vec<usize>) {
+        if self.fire_time < now {
+            self.callback(MgStatus::Ok, MgEvent::EvTimer);
+            self.fire_time = now + self.interval;
+
+            if self.once {
+                expired.push(index);
+            }
+        }
+    }
+
+    fn handle_tcp_conn_connect(&mut self,
+                            index: usize,
+                            expired: &mut Vec<usize>) {
+        if let Ok(stream) = TcpStream::connect(
+                        format!("{}:{}", self.host, self.port)) {
+            match stream.set_nonblocking(true) {
+                Ok(_) => {
+                    self.tcp_stream = Some(stream);
+                    self.callback(MgStatus::Ok, MgEvent::EvConnect);
+                    return;
+                },
+                _ => {},
+            }
+        }
+
+        self.callback(MgStatus::TCPConnectionError,
+        MgEvent::EvConnect);
+        expired.push(index);
+    }
+
+    fn handle_tcp_conn_connected(&mut self,
+                            _index: usize,
+                            _expired: &mut Vec<usize>) {
+        match self.flag {
+            MgFlag::MgWriteError => {
+                self.callback(MgStatus::TCPWriteError, MgEvent::EvSend);
+            },
+            MgFlag::MgSent => {
+                self.callback(MgStatus::Ok, MgEvent::EvSend);
+                self.flag = MgFlag::MgWaitForData;
+            },
+            MgFlag::MgWaitForData => {
+                if self.read_ready() {
+                    self.callback(MgStatus::Ok, MgEvent::EvRecv);
+                }
+            },
+            _ => {}
+        }
+    }
+
+    fn handle_tcp_conn(&mut self,
+                    index: usize,
+                    expired: &mut Vec<usize>) {
+        debug!("Handling TCP Conn: {:?} - {:?}", self.id(), self.flag);
+        match self.tcp_stream {
+            None => self.handle_tcp_conn_connect(index, expired),
+            Some(_) => self.handle_tcp_conn_connected(index, expired),
+        }
+    }
+
+    fn read_ready(&mut self) -> bool {
+        let mut buffer = [0u8; 0];
+
+        if let Some(stream) = self.tcp_stream.as_mut() {
+            match stream.peek(&mut buffer) {
+                Ok(_) => {
+                    return true;
+                },
+                _ => {
+                    error!("Error reading from stream");
+                },
+            }
+        }
+
+        return false
     }
 
     pub fn close_now(&mut self) {
@@ -149,100 +243,6 @@ impl MgConn {
     }
 }
 
-fn callback(conn: &mut MgConn, status: MgStatus, ev: MgEvent) {
-    (conn.cb)(conn, ev, status, conn.user_data.clone());
-}
-
-fn handle_timer_conn(conn: &mut MgConn,
-                index: usize,
-                now: Instant,
-                expired: &mut Vec<usize>) {
-    if conn.fire_time < now {
-        callback(conn, MgStatus::Ok, MgEvent::EvTimer);
-        conn.fire_time = now + conn.interval;
-
-        if conn.once {
-            expired.push(index);
-        }
-    }
-}
-
-fn tcp_conn_read_ready(conn: &mut MgConn) -> bool {
-    let mut buffer: [u8; 1] = [0; 1];
-
-    if let Some(stream) = conn.tcp_stream.as_mut() {
-        match stream.peek(&mut buffer) {
-            Ok(size) => {
-                println!("size is: {}", size);
-                if size > 0 {
-                    return true
-                }
-            },
-            _ => {},
-        }
-    }
-
-    false
-}
-
-fn handle_tcp_conn_connect(conn: &mut MgConn,
-                        index: usize,
-                        expired: &mut Vec<usize>) {
-    if let Ok(stream) = TcpStream::connect(
-                                format!("{}:{}", conn.host, conn.port)) {
-        match stream.set_nonblocking(true) {
-            Ok(_) => {
-                conn.tcp_stream = Some(stream);
-                callback(conn,
-                    MgStatus::Ok,
-                    MgEvent::EvConnect);
-                return;
-            },
-            _ => {},
-        }
-    }
-
-    callback(conn,
-        MgStatus::TCPConnectionError,
-        MgEvent::EvConnect);
-        expired.push(index);
-}
-
-fn handle_tcp_conn_connected(conn: &mut MgConn,
-                        _index: usize,
-                        _expired: &mut Vec<usize>) {
-    match conn.flag {
-        MgFlag::MgWriteError => {
-            callback(conn,
-            MgStatus::TCPWriteError,
-            MgEvent::EvSend)
-        },
-        MgFlag::MgSent => {
-            callback(conn,
-                MgStatus::Ok,
-                MgEvent::EvSend);
-            conn.flag = MgFlag::MgWaitForData;
-        },
-        MgFlag::MgWaitForData => {
-            if tcp_conn_read_ready(conn) {
-                callback(conn,
-                    MgStatus::Ok,
-                    MgEvent::EvRecv);
-            }
-        },
-        _ => {}
-    }
-}
-
-fn handle_tcp_conn(conn: &mut MgConn,
-                index: usize,
-                expired: &mut Vec<usize>) {
-    match conn.tcp_stream {
-        None => handle_tcp_conn_connect(conn, index, expired),
-        Some(_) => handle_tcp_conn_connected(conn, index, expired),
-    }
-}
-
 /* private functions */
 impl MgMgr {
     fn handle_conns(&mut self, now: Instant, expired: &mut Vec<usize>) {
@@ -253,8 +253,8 @@ impl MgMgr {
             }
 
             match conn.conn_type {
-                MgConnType::Timer => handle_timer_conn(conn, index, now, expired),
-                MgConnType::TCP => handle_tcp_conn(conn, index, expired),
+                MgConnType::Timer => conn.handle_timer_conn(index, now, expired),
+                MgConnType::TCP => conn.handle_tcp_conn(index, expired),
             }
         }
     }
@@ -291,7 +291,7 @@ impl MgMgr {
             user_data
         );
 
-        println!(
+        debug!(
             "Adding timer: id={}, once={}, interval={:?}",
             conn.id(), once, interval
         );
@@ -312,7 +312,7 @@ impl MgMgr {
             cb,
             user_data
         );
-        println!("Adding TCP Conn to {}:{}", conn.host, conn.port);
+        debug!("Adding TCP Conn to {}:{}", conn.host, conn.port);
         self.conns.push(conn);
     }
 
